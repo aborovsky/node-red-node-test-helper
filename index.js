@@ -123,7 +123,7 @@ class NodeTestHelper extends EventEmitter {
         }
     }
 
-    load(testNode, testFlow, testCredentials, cb) {
+    load(testNode, testFlow, testCredentials, testSettings, cb) {
         const log = this._log;
         const logSpy = this._logSpy = this._sandbox.spy(log, 'log');
         logSpy.FATAL = log.FATAL;
@@ -155,13 +155,23 @@ class NodeTestHelper extends EventEmitter {
             testCredentials = {};
         }
 
+        if (typeof testSettings === 'function') {
+            cb = testSettings;
+            testSettings = {};
+        }
+
         var storage = {
             getFlows: function () {
                 return when.resolve({flows:testFlow,credentials:testCredentials});
             }
         };
         // this._settings.logging = {console:{level:'off'}};
-        this._settings.available = function() { return false; }
+        this._settings = Object.assign(
+            {},
+            this._settings,
+            { available: function () { return false; } },
+            testSettings
+        );
 
         const redNodes = this._redNodes;
         this._httpAdmin = express();
