@@ -73,8 +73,12 @@ describe('lower-case Node', function () {
     var flow = [{ id: "n1", type: "lower-case", name: "lower-case" }];
     helper.load(lowerNode, flow, function () {
       var n1 = helper.getNode("n1");
-      n1.should.have.property('name', 'lower-case');
-      done();
+      try {
+        n1.should.have.property('name', 'lower-case');
+        done();
+      } catch(err) {
+        done(err);
+      }
     });
   });
 
@@ -87,8 +91,12 @@ describe('lower-case Node', function () {
       var n2 = helper.getNode("n2");
       var n1 = helper.getNode("n1");
       n2.on("input", function (msg) {
-        msg.should.have.property('payload', 'uppercase');
-        done();
+        try {
+          msg.should.have.property('payload', 'uppercase');
+          done();
+        } catch(err) {
+          done(err);
+        }
       });
       n1.receive({ payload: "UpperCase" });
     });
@@ -100,9 +108,19 @@ In this example, we require `should` for assertions, this helper module, as well
 
 We then have a set of mocha unit tests.  These tests check that the node loads correctly, and ensures it makes the payload string lower case as expected.
 
+Note how the assertion failures are caught explicitly and passed to the `done()` call.  Node-RED swallows exceptions that are raised in the flow, so we make sure the test framework is aware of them.  Not doing so would simply lead to a test timeout because `done()` is never called in case of an assertion failure.
+
 ## Initializing Helper
 
-To get started, we need to tell the helper where to find the node-red runtime.  this is done by calling `helper.init(require.resolve('node-red'))` as shown.
+To get started, we need to tell the helper where to find the node-red runtime.  This is done by calling `helper.init(require.resolve('node-red'))` as shown.
+
+The helper takes an optional `userSettings` parameter which is merged with the runtime defaults.
+
+```javascript
+helper.init(require.resolve('node-red'), { 
+    functionGlobalContext: { os:require('os') }
+});
+```
 
 ## Getting nodes in the runtime
 
@@ -318,6 +336,20 @@ Example:
 
 ```javascript
 helper.request().post('/inject/invalid').expect(404).end(done);
+```
+
+### settings(userSettings)
+
+Merges any userSettings with the defaults returned by `RED.settings`. Each invocation of this method will overwrite the previous userSettings to prevent unexpected problems in your tests.
+
+This will enable you to replicate your production environment within your tests, for example where you're using the `functionGlobalContext` to enable extra node modules within your functions.
+
+```javascript
+// functions can now access os via global.get('os')
+helper.settings({ functionGlobalContext: { os:require('os') } });
+
+// reset back to defaults
+helper.settings({ });
 ```
 
 ### startServer(done)

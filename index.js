@@ -18,9 +18,10 @@
 const path = require("path");
 const sinon = require("sinon");
 const should = require('should');
+const fs = require('fs');
 require('should-sinon');
-const when = require("when");
 const request = require('supertest');
+var bodyParser = require("body-parser");
 const express = require("express");
 const http = require('http');
 const stoppable = require('stoppable');
@@ -36,9 +37,9 @@ const PROXY_METHODS = ['log', 'status', 'warn', 'error', 'debug', 'trace', 'send
 function findRuntimePath() {
   const upPkg = readPkgUp.sync();
   // case 1: we're in NR itself
-  if (upPkg.pkg.name === 'node-red') {
-    if (checkSemver(upPkg.pkg.version,"<0.20.0")) {
-      return path.join(path.dirname(upPkg.path), upPkg.pkg.main);
+  if (upPkg.packageJson.name === 'node-red') {
+    if (checkSemver(upPkg.packageJson.version,"<0.20.0")) {
+      return path.join(path.dirname(upPkg.path), upPkg.packageJson.main);
     } else {
       return path.join(path.dirname(upPkg.path),"packages","node_modules","node-red");
     }
@@ -48,14 +49,19 @@ function findRuntimePath() {
     return require.resolve('node-red');
   } catch (ignored) {}
   // case 3: NR is installed alongside node-red-node-test-helper
-  if ((upPkg.pkg.dependencies && upPkg.pkg.dependencies['node-red']) ||
-    (upPkg.pkg.devDependencies && upPkg.pkg.devDependencies['node-red'])) {
+  if ((upPkg.packageJson.dependencies && upPkg.packageJson.dependencies['node-red']) ||
+    (upPkg.packageJson.devDependencies && upPkg.packageJson.devDependencies['node-red'])) {
     const dirpath = path.join(path.dirname(upPkg.path), 'node_modules', 'node-red');
     try {
       const pkg = require(path.join(dirpath, 'package.json'));
       return path.join(dirpath, pkg.main);
     } catch (ignored) {}
   }
+    // case 4: NR & NRNTH are git repos sat alongside each other
+    try {
+        const nrpkg = require("../node-red/package.json");
+        return "../node-red/packages/node_modules/node-red"
+    } catch(ignored) {}
 }
 
 
@@ -84,7 +90,7 @@ class NodeTestHelper extends EventEmitter {
       // public runtime API
       this._log = RED.log;
       // access internal Node-RED runtime methods
-      const prefix = path.dirname(requirePath);
+      let prefix = path.dirname(requirePath);
       if (checkSemver(RED.version(),"<0.20.0")) {
         this._settings = RED.settings;
         this._events = RED.events;
@@ -96,19 +102,37 @@ class NodeTestHelper extends EventEmitter {
         // information about the latest call
         this._NodePrototype = require(path.join(prefix, 'runtime', 'nodes', 'Node')).prototype;
       } else {
-        // This is good enough for running it within the NR git repository - given the
-        // code layout changes. But it will need some more work when running in the other
-        // possible locations
+        if (!fs.existsSync(path.join(prefix, '@node-red/runtime/lib/nodes'))) {
+                    // Not in the NR source tree, need to go hunting for the modules....
+        if (fs.existsSync(path.join(prefix,'..','node_modules','@node-red/runtime/lib/nodes'))) {
+                        // path/to/node_modules/node-red/lib
+                        // path/to/node_modules/node-red/node_modules/@node-red
+                        prefix = path.resolve(path.join(prefix,"..","node_modules"));
+                    } else if (fs.existsSync(path.join(prefix,'..','..','@node-red/runtime/lib/nodes'))) {
+                        // path/to/node_modules/node-red/lib
+                        // path/to/node_modules/@node-red
+                        prefix = path.resolve(path.join(prefix,"..",".."));
+                    } else {
+                        throw new Error("Cannot find the NR source tree. Path: '"+prefix+"'. Please raise an issue against node-red/node-red-node-test-helper with full details.");
+                    }
+                }
+
         this._redNodes = require(path.join(prefix, '@node-red/runtime/lib/nodes'));
-        this._settings = RED.settings;
-        this._events = RED.runtime.events;
+
         this._context = require(path.join(prefix, '@node-red/runtime/lib/nodes/context'));
         this._comms = require(path.join(prefix, '@node-red/editor-api/lib/editor/comms'));
         this._registryUtil = require(path.join(prefix, '@node-red/registry/lib/util'));
         this.credentials = require(path.join(prefix, '@node-red/runtime/lib/nodes/credentials'));
         // proxy the methods on Node.prototype to both be Sinon spies and asynchronously emit
         // information about the latest call
-        this._NodePrototype = require(path.join(prefix, '@node-red/runtime/lib/nodes/Node')).prototype;
+        this._NodePrototype = require(path.join(prefix, '@node-red/runtime/lib/nodes/Node')).prototype;this._settings = RED.settings;
+                this._events = RED.runtime.events;
+
+                this._nodeModules = {
+                    'catch': require(path.join(prefix, '@node-red/nodes/core/common/25-catch.js')),
+                    'status': require(path.join(prefix, '@node-red/nodes/core/common/25-status.js')),
+                    'complete': require(path.join(prefix, '@node-red/nodes/core/common/24-complete.js'))
+                }
       }
     } catch (ignored) {
       console.log(ignored);
@@ -116,13 +140,45 @@ class NodeTestHelper extends EventEmitter {
     }
   }
 
-  init(runtimePath) {
+  init(runtimePath, userSettings) {
     runtimePath = runtimePath || findRuntimePath();
     if (runtimePath) {
       this._initRuntime(runtimePath);
+    if (userSettings) {
+                this.settings(userSettings);
+            }
+        }
     }
+
+    /**
+     * Merges any userSettings with the defaults returned by `RED.settings`. Each
+     * invocation of this method will overwrite the previous userSettings to prevent
+     * unexpected problems in your tests.
+     *
+     * This will enable you to replicate your production environment within your tests,
+     * for example where you're using the `functionGlobalContext` to enable extra node
+     * modules within your functions.
+     * @example
+     * helper.settings({ functionGlobalContext: { os:require('os') } });
+     * @param {Object} userSettings - an object containing the runtime settings
+     * @return {Object} custom userSettings merged with default RED.settings
+     */
+    settings(userSettings) {
+        if (userSettings) {
+            // to prevent unexpected problems, always merge with the default RED.settings
+            this._settings = Object.assign({}, this._RED.settings, userSettings);
+        }
+        return this._settings;
   }
 
+  /**
+   * @param testNode
+   * @param testFlow
+   * @param testCredentials
+   * @param testSettings - optional
+   * @param cb
+   * @return {PromiseLike<T>|*}
+   */
   load(testNode, testFlow, testCredentials, testSettings, cb) {
     const log = this._log;
     const logSpy = this._logSpy = this._sandbox.spy(log, 'log');
@@ -162,7 +218,7 @@ class NodeTestHelper extends EventEmitter {
 
     var storage = {
       getFlows: function () {
-        return when.resolve({flows:testFlow,credentials:testCredentials});
+        return Promise.resolve({flows:testFlow,credentials:testCredentials});
       }
     };
     // this._settings.logging = {console:{level:'off'}};
@@ -175,7 +231,8 @@ class NodeTestHelper extends EventEmitter {
 
     const redNodes = this._redNodes;
     this._httpAdmin = express();
-    const mockRuntime = {
+    this._httpAdmin.use(bodyParser.json({limit:'5mb'}));
+        this._httpAdmin.use(bodyParser.urlencoded({limit:'5mb',extended:true}));const mockRuntime = {
       nodes: redNodes,
       events: this._events,
       util: this._RED.util,
@@ -231,18 +288,26 @@ class NodeTestHelper extends EventEmitter {
         });
     }
 
-    if (Array.isArray(testNode)) {
-      testNode.forEach(fn => {
-        fn(red);
-      });
-    } else {
-      testNode(red);
-    }
-    redNodes.loadFlows()
-      .then(() => {
-        redNodes.startFlows();
+    let preloadedCoreModules = new Set();
+        testFlow.forEach(n => {
+            if (this._nodeModules.hasOwnProperty(n.type)) {
+                // Go find the 'real' core node module and load it...
+                this._nodeModules[n.type](red);
+                preloadedCoreModules.add(this._nodeModules[n.type]);
+            }
+        })
+
+        if (!Array.isArray(testNode)) {
+      testNode = [testNode];
+        }testNode.forEach(fn => {
+        if (!preloadedCoreModules.has(fn)) {fn(red);
+      }
+    } );
+
+    return redNodes.loadFlows()
+      .then(redNodes.startFlows).then(() => {
         should.deepEqual(testFlow, redNodes.getFlows().flows);
-        cb();
+        if(cb) cb();
       });
   }
 
@@ -274,15 +339,13 @@ class NodeTestHelper extends EventEmitter {
     return request(this._httpAdmin);
   }
 
-  startServer(done) {
+  startServer(done, initSettings) {
     this._app = express();
     const server = stoppable(http.createServer((req, res) => {
       this._app(req, res);
     }), 0);
 
-    this._RED.init(server,{
-      logging:{console:{level:'off'}}
-    });
+    this._RED.init(server, Object.assign({},{ logging:{console:{level:'off'}}} , initSettings || {}));
     server.listen(this._listenPort, this._address);
     server.on('listening', () => {
       this._port = server.address().port;
